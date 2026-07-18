@@ -361,6 +361,7 @@ def build_tenure_usage_scatter(customers: pd.DataFrame) -> go.Figure:
 # 페이지 구성
 # ---------------------------------------------------------------------------
 st.title("고객은 왜 이탈하는가 — 이탈 원인 진단 대시보드")
+st.caption("EDATA 7기 · 강나형")
 
 customers_df = load_customers()
 total_customers = len(customers_df)
