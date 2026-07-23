@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from google.cloud import bigquery
 from plotly.subplots import make_subplots
 
 st.set_page_config(page_title="고객은 왜 이탈하는가", layout="wide")
@@ -17,6 +18,25 @@ COLOR_NEUTRAL = "#898781"
 COLOR_HIGHLIGHT = "#d03b3b"
 COLOR_BAR = "#2a78d6"
 COLOR_LINE = "#eb6834"
+COLOR_POSITIVE = "#2a9d57"
+
+BQ_PROJECT_ID = "project-6342726b-6c19-4847-844"
+BQ_DATASET = "project1_day1"
+TEAM_OPTIONS = ["전체", "1팀", "2팀", "3팀"]
+
+
+# ---------------------------------------------------------------------------
+# BigQuery 연결 (상담원 섹션 전용 — customers/voc 등 기존 6개 차트는 CSV 그대로 사용)
+# ---------------------------------------------------------------------------
+@st.cache_resource
+def get_bigquery_client() -> bigquery.Client:
+    return bigquery.Client(project=BQ_PROJECT_ID)
+
+
+def _team_job_config(team: str) -> bigquery.QueryJobConfig | None:
+    if team == "전체":
+        return None
+    return bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("team", "STRING", team)])
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +378,179 @@ def build_tenure_usage_scatter(customers: pd.DataFrame) -> go.Figure:
 
 
 # ---------------------------------------------------------------------------
+# ⑦ 상담원 데이터로 본 조직 건강도 (BigQuery agents/consultations/satisfaction 직접 조회)
+# 팀 selectbox가 바뀔 때마다 리런되며 BigQuery를 다시 조회한다 (쿼리 결과는 캐싱하지 않음).
+# ---------------------------------------------------------------------------
+def load_enps(team: str) -> tuple[float, int]:
+    client = get_bigquery_client()
+    where_clause = "WHERE team = @team" if team != "전체" else ""
+    query = f"""
+        SELECT agent_satisfaction
+        FROM `{BQ_PROJECT_ID}.{BQ_DATASET}.agents`
+        {where_clause}
+    """
+    df = client.query(query, job_config=_team_job_config(team)).to_dataframe()
+
+    def categorize(score):
+        if score >= 9:
+            return "promoter"
+        if score >= 7:
+            return "passive"
+        return "detractor"
+
+    category = df["agent_satisfaction"].apply(categorize)
+    enps = (category == "promoter").mean() * 100 - (category == "detractor").mean() * 100
+    return enps, len(df)
+
+
+def build_enps_gauge_chart(team: str, enps: float, n: int) -> go.Figure:
+    bar_color = COLOR_HIGHLIGHT if enps < 0 else COLOR_POSITIVE
+    fig = go.Figure(
+        go.Indicator(
+            mode="gauge+number",
+            value=enps,
+            number={"valueformat": ".0f"},
+            title={"text": f"{team} eNPS (n={n})"},
+            gauge={
+                "axis": {"range": [-100, 100]},
+                "bar": {"color": bar_color, "thickness": 0.3},
+                "steps": [
+                    {"range": [-100, 0], "color": "#f7dcdc"},
+                    {"range": [0, 100], "color": "#dcefdf"},
+                ],
+                "threshold": {"line": {"color": "#333333", "width": 2}, "thickness": 0.9, "value": 0},
+            },
+        )
+    )
+    fig.update_layout(height=320, margin=dict(t=70, b=20, l=40, r=40))
+    return fig
+
+
+def load_burnout_csat(team: str) -> pd.DataFrame:
+    client = get_bigquery_client()
+    where_clause = "WHERE a.team = @team" if team != "전체" else ""
+    query = f"""
+        SELECT
+            a.agent_id,
+            a.overtime_hours_avg,
+            AVG(s.csat) AS csat_avg
+        FROM `{BQ_PROJECT_ID}.{BQ_DATASET}.agents` a
+        JOIN `{BQ_PROJECT_ID}.{BQ_DATASET}.consultations` c ON c.agent_id = a.agent_id
+        JOIN `{BQ_PROJECT_ID}.{BQ_DATASET}.satisfaction` s ON s.consult_id = c.consult_id
+        {where_clause}
+        GROUP BY a.agent_id, a.overtime_hours_avg
+    """
+    return client.query(query, job_config=_team_job_config(team)).to_dataframe()
+
+
+def build_burnout_csat_chart(df: pd.DataFrame) -> go.Figure:
+    r = df["overtime_hours_avg"].corr(df["csat_avg"]) if len(df) >= 2 else float("nan")
+
+    fig = px.scatter(
+        df,
+        x="overtime_hours_avg",
+        y="csat_avg",
+        trendline="ols" if len(df) >= 3 else None,
+        trendline_color_override=COLOR_LINE,
+        custom_data=["agent_id", "overtime_hours_avg", "csat_avg"],
+        labels={"overtime_hours_avg": "월 평균 초과근무시간", "csat_avg": "CSAT 평균"},
+    )
+    fig.update_traces(
+        selector=dict(mode="markers"),
+        marker=dict(size=12, color=COLOR_BAR, opacity=0.85, line=dict(width=1, color="white")),
+        hovertemplate=(
+            "<b>%{customdata[0]}</b><br>초과근무: %{customdata[1]}시간<br>"
+            "CSAT 평균: %{customdata[2]:.3f}<extra></extra>"
+        ),
+    )
+    fig.add_annotation(
+        x=1,
+        y=1,
+        xref="paper",
+        yref="paper",
+        xanchor="right",
+        yanchor="bottom",
+        text=f"r = {r:.2f}" if pd.notna(r) else "r = N/A (표본 부족)",
+        showarrow=False,
+        font=dict(size=14),
+        bgcolor="rgba(255,255,255,0.7)",
+    )
+    fig.update_layout(height=420, margin=dict(t=50, b=40, l=60, r=20))
+    return fig
+
+
+def load_training_comparison(team: str) -> pd.DataFrame:
+    client = get_bigquery_client()
+    where_clause = "WHERE a.team = @team" if team != "전체" else ""
+    query = f"""
+        WITH base AS (
+            SELECT
+                a.agent_id,
+                a.training_completed_yn,
+                c.consult_id,
+                c.is_recontact
+            FROM `{BQ_PROJECT_ID}.{BQ_DATASET}.agents` a
+            JOIN `{BQ_PROJECT_ID}.{BQ_DATASET}.consultations` c ON c.agent_id = a.agent_id
+            {where_clause}
+        ),
+        with_csat AS (
+            SELECT b.*, s.csat
+            FROM base b
+            JOIN `{BQ_PROJECT_ID}.{BQ_DATASET}.satisfaction` s ON s.consult_id = b.consult_id
+        )
+        SELECT
+            training_completed_yn,
+            COUNT(*) AS n_consults,
+            COUNT(DISTINCT agent_id) AS n_agents,
+            AVG(csat) AS csat_avg,
+            100.0 * SUM(IF(is_recontact, 1, 0)) / COUNT(*) AS recontact_rate_pct
+        FROM with_csat
+        GROUP BY training_completed_yn
+    """
+    df = client.query(query, job_config=_team_job_config(team)).to_dataframe()
+    df["교육이수"] = df["training_completed_yn"].map({True: "Y", False: "N"})
+    return df.set_index("교육이수").reindex(["N", "Y"])
+
+
+def build_training_comparison_chart(df: pd.DataFrame) -> go.Figure:
+    group_order = ["N", "Y"]
+    colors = [COLOR_NEUTRAL, COLOR_BAR]
+
+    fig = make_subplots(rows=1, cols=2, subplot_titles=("CSAT 평균", "재문의율 평균"))
+
+    fig.add_trace(
+        go.Bar(
+            x=group_order,
+            y=df["csat_avg"],
+            marker_color=colors,
+            text=df["csat_avg"].map(lambda v: f"{v:.2f}"),
+            textposition="outside",
+            showlegend=False,
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Bar(
+            x=group_order,
+            y=df["recontact_rate_pct"],
+            marker_color=colors,
+            text=df["recontact_rate_pct"].map(lambda v: f"{v:.1f}%"),
+            textposition="outside",
+            showlegend=False,
+        ),
+        row=1,
+        col=2,
+    )
+
+    fig.update_yaxes(title_text="CSAT 평균", range=[0, 5], row=1, col=1)
+    fig.update_yaxes(title_text="재문의율 (%)", range=[0, 50], ticksuffix="%", row=1, col=2)
+    fig.update_xaxes(title_text="교육 이수 여부")
+    fig.update_layout(height=380, margin=dict(t=60, b=40, l=60, r=20), showlegend=False)
+    return fig
+
+
+# ---------------------------------------------------------------------------
 # 페이지 구성
 # ---------------------------------------------------------------------------
 st.title("고객은 왜 이탈하는가 — 이탈 원인 진단 대시보드")
@@ -392,3 +585,21 @@ st.plotly_chart(build_region_chart(customers_df), use_container_width=True)
 
 st.subheader("⑥ 가입기간·이용량으로 본 이탈")
 st.plotly_chart(build_tenure_usage_scatter(customers_df), use_container_width=True)
+
+st.divider()
+
+st.subheader("상담원 관점: 직원만족도와 고객 경험")
+st.caption("BigQuery agents·consultations·satisfaction 테이블을 직접 조회 (팀 선택 시마다 재조회, 캐시 없음)")
+
+selected_team = st.selectbox("팀 선택", TEAM_OPTIONS)
+
+gauge_col, scatter_col = st.columns([1, 2])
+with gauge_col:
+    enps_value, enps_n = load_enps(selected_team)
+    st.plotly_chart(build_enps_gauge_chart(selected_team, enps_value, enps_n), use_container_width=True)
+with scatter_col:
+    burnout_df = load_burnout_csat(selected_team)
+    st.plotly_chart(build_burnout_csat_chart(burnout_df), use_container_width=True)
+
+training_df = load_training_comparison(selected_team)
+st.plotly_chart(build_training_comparison_chart(training_df), use_container_width=True)
