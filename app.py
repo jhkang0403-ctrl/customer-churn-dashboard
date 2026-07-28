@@ -1,16 +1,19 @@
 import os
+from datetime import datetime
 
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 from google.cloud import bigquery
+from google.oauth2 import service_account
 from plotly.subplots import make_subplots
 
 st.set_page_config(page_title="고객은 왜 이탈하는가", layout="wide")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
+REPORT_PATH = os.path.join(BASE_DIR, "report", "고객서비스_만족도개선_리포트.md")
 
 REFERENCE_DATE = pd.Timestamp("2024-12-31")
 
@@ -30,6 +33,15 @@ TEAM_OPTIONS = ["전체", "1팀", "2팀", "3팀"]
 # ---------------------------------------------------------------------------
 @st.cache_resource
 def get_bigquery_client() -> bigquery.Client:
+    try:
+        if "gcp_service_account" in st.secrets:
+            credentials = service_account.Credentials.from_service_account_info(
+                st.secrets["gcp_service_account"]
+            )
+            return bigquery.Client(project=BQ_PROJECT_ID, credentials=credentials)
+    except Exception:
+        # st.secrets 파일 자체가 없는 로컬 환경 등 — 기존처럼 ADC로 폴백
+        pass
     return bigquery.Client(project=BQ_PROJECT_ID)
 
 
@@ -37,6 +49,15 @@ def _team_job_config(team: str) -> bigquery.QueryJobConfig | None:
     if team == "전체":
         return None
     return bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("team", "STRING", team)])
+
+
+def load_with_fallback(live_fn, snapshot_fn, *args, **kwargs):
+    """live_fn을 먼저 시도하고, 인증/네트워크 등 어떤 이유로든 실패하면 snapshot_fn으로 대체한다.
+    반환값은 (결과, source) 튜플이며 source는 "live" 또는 "snapshot"이다."""
+    try:
+        return live_fn(*args, **kwargs), "live"
+    except Exception:
+        return snapshot_fn(*args, **kwargs), "snapshot"
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +89,17 @@ def load_satisfaction() -> pd.DataFrame:
 @st.cache_data
 def load_usage_history() -> pd.DataFrame:
     return pd.read_csv(os.path.join(DATA_DIR, "data_usage_history.csv"), encoding="utf-8-sig")
+
+
+@st.cache_data
+def load_report_markdown() -> str:
+    with open(REPORT_PATH, "r", encoding="utf-8") as f:
+        content = f.read()
+    if content.startswith("---"):
+        end = content.find("\n---", 3)
+        if end != -1:
+            content = content[end + 4 :].lstrip("\n")
+    return content
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +544,72 @@ def load_training_comparison(team: str) -> pd.DataFrame:
     return df.set_index("교육이수").reindex(["N", "Y"])
 
 
+# ---------------------------------------------------------------------------
+# 스냅샷 CSV 폴백 (BigQuery 라이브 조회 실패 시 대체 — data/*_snapshot.csv, load_with_fallback과 함께 사용)
+# ---------------------------------------------------------------------------
+def _agent_snapshot_date_label() -> str:
+    mtime = datetime.fromtimestamp(os.path.getmtime(os.path.join(DATA_DIR, "agents_snapshot.csv")))
+    return f"{mtime.month}월 {mtime.day}일"
+
+
+def _load_agents_snapshot() -> pd.DataFrame:
+    return pd.read_csv(os.path.join(DATA_DIR, "agents_snapshot.csv"), encoding="utf-8-sig")
+
+
+def _load_agent_consultations_snapshot() -> pd.DataFrame:
+    return pd.read_csv(os.path.join(DATA_DIR, "agent_consultations_snapshot.csv"), encoding="utf-8-sig")
+
+
+def load_enps_snapshot(team: str) -> tuple[float, int]:
+    agents = _load_agents_snapshot()
+    if team != "전체":
+        agents = agents[agents["team"] == team]
+
+    def categorize(score):
+        if score >= 9:
+            return "promoter"
+        if score >= 7:
+            return "passive"
+        return "detractor"
+
+    category = agents["agent_satisfaction"].apply(categorize)
+    enps = (category == "promoter").mean() * 100 - (category == "detractor").mean() * 100
+    return enps, len(agents)
+
+
+def load_burnout_csat_snapshot(team: str) -> pd.DataFrame:
+    agents = _load_agents_snapshot()
+    if team != "전체":
+        agents = agents[agents["team"] == team]
+    consultations = _load_agent_consultations_snapshot()
+    merged = consultations.merge(agents[["agent_id", "overtime_hours_avg"]], on="agent_id", how="inner")
+    return (
+        merged.groupby(["agent_id", "overtime_hours_avg"], as_index=False)["csat"]
+        .mean()
+        .rename(columns={"csat": "csat_avg"})
+    )
+
+
+def load_training_comparison_snapshot(team: str) -> pd.DataFrame:
+    agents = _load_agents_snapshot()
+    if team != "전체":
+        agents = agents[agents["team"] == team]
+    consultations = _load_agent_consultations_snapshot()
+    merged = consultations.merge(agents[["agent_id", "training_completed_yn"]], on="agent_id", how="inner")
+    df = (
+        merged.groupby("training_completed_yn")
+        .agg(
+            n_consults=("consult_id", "count"),
+            n_agents=("agent_id", "nunique"),
+            csat_avg=("csat", "mean"),
+            recontact_rate_pct=("is_recontact", lambda s: 100.0 * s.sum() / len(s)),
+        )
+        .reset_index()
+    )
+    df["교육이수"] = df["training_completed_yn"].map({True: "Y", False: "N"})
+    return df.set_index("교육이수").reindex(["N", "Y"])
+
+
 def build_training_comparison_chart(df: pd.DataFrame) -> go.Figure:
     group_order = ["N", "Y"]
     colors = [COLOR_NEUTRAL, COLOR_BAR]
@@ -556,50 +654,69 @@ def build_training_comparison_chart(df: pd.DataFrame) -> go.Figure:
 st.title("고객은 왜 이탈하는가 — 이탈 원인 진단 대시보드")
 st.caption("EDATA 7기 · 강나형")
 
-customers_df = load_customers()
-total_customers = len(customers_df)
-churned_customers = int(customers_df["is_churned"].sum())
-churn_rate = churned_customers / total_customers * 100
+tab_dashboard, tab_report = st.tabs(["대시보드", "개선 제안 리포트"])
 
-with st.container(horizontal=True):
-    st.metric("전체 고객 수", f"{total_customers:,}명", border=True)
-    st.metric("이탈 고객 수", f"{churned_customers:,}명", border=True)
-    st.metric("전체 이탈율", f"{churn_rate:.1f}%", border=True)
+with tab_dashboard:
+    customers_df = load_customers()
+    total_customers = len(customers_df)
+    churned_customers = int(customers_df["is_churned"].sum())
+    churn_rate = churned_customers / total_customers * 100
 
-st.divider()
+    with st.container(horizontal=True):
+        st.metric("전체 고객 수", f"{total_customers:,}명", border=True)
+        st.metric("이탈 고객 수", f"{churned_customers:,}명", border=True)
+        st.metric("전체 이탈율", f"{churn_rate:.1f}%", border=True)
 
-st.subheader("① VOC로 본 이탈")
-st.plotly_chart(build_voc_chart(customers_df), use_container_width=True)
+    st.divider()
 
-st.subheader("② 채널·만족도로 본 이탈")
-st.plotly_chart(build_channel_csat_chart(), use_container_width=True)
+    st.subheader("① VOC로 본 이탈")
+    st.plotly_chart(build_voc_chart(customers_df), use_container_width=True)
 
-st.subheader("③ 재문의 반복으로 본 이탈")
-st.plotly_chart(build_recontact_bucket_chart(customers_df), use_container_width=True)
+    st.subheader("② 채널·만족도로 본 이탈")
+    st.plotly_chart(build_channel_csat_chart(), use_container_width=True)
 
-st.subheader("④ 요금제로 본 이탈")
-st.plotly_chart(build_plan_chart(customers_df), use_container_width=True)
+    st.subheader("③ 재문의 반복으로 본 이탈")
+    st.plotly_chart(build_recontact_bucket_chart(customers_df), use_container_width=True)
 
-st.subheader("⑤ 지역으로 본 이탈")
-st.plotly_chart(build_region_chart(customers_df), use_container_width=True)
+    st.subheader("④ 요금제로 본 이탈")
+    st.plotly_chart(build_plan_chart(customers_df), use_container_width=True)
 
-st.subheader("⑥ 가입기간·이용량으로 본 이탈")
-st.plotly_chart(build_tenure_usage_scatter(customers_df), use_container_width=True)
+    st.subheader("⑤ 지역으로 본 이탈")
+    st.plotly_chart(build_region_chart(customers_df), use_container_width=True)
 
-st.divider()
+    st.subheader("⑥ 가입기간·이용량으로 본 이탈")
+    st.plotly_chart(build_tenure_usage_scatter(customers_df), use_container_width=True)
 
-st.subheader("상담원 관점: 직원만족도와 고객 경험")
-st.caption("BigQuery agents·consultations·satisfaction 테이블을 직접 조회 (팀 선택 시마다 재조회, 캐시 없음)")
+    st.divider()
 
-selected_team = st.selectbox("팀 선택", TEAM_OPTIONS)
+    st.subheader("상담원 관점: 직원만족도와 고객 경험")
+    st.caption("BigQuery agents·consultations·satisfaction 테이블을 직접 조회 (팀 선택 시마다 재조회, 캐시 없음)")
 
-gauge_col, scatter_col = st.columns([1, 2])
-with gauge_col:
-    enps_value, enps_n = load_enps(selected_team)
-    st.plotly_chart(build_enps_gauge_chart(selected_team, enps_value, enps_n), use_container_width=True)
-with scatter_col:
-    burnout_df = load_burnout_csat(selected_team)
-    st.plotly_chart(build_burnout_csat_chart(burnout_df), use_container_width=True)
+    selected_team = st.selectbox("팀 선택", TEAM_OPTIONS)
 
-training_df = load_training_comparison(selected_team)
-st.plotly_chart(build_training_comparison_chart(training_df), use_container_width=True)
+    (enps_value, enps_n), enps_source = load_with_fallback(load_enps, load_enps_snapshot, selected_team)
+    burnout_df, burnout_source = load_with_fallback(load_burnout_csat, load_burnout_csat_snapshot, selected_team)
+    training_df, training_source = load_with_fallback(
+        load_training_comparison, load_training_comparison_snapshot, selected_team
+    )
+
+    if "snapshot" in (enps_source, burnout_source, training_source):
+        st.caption(
+            f"🟡 로컬 스냅샷 데이터 ({_agent_snapshot_date_label()} 기준) — "
+            "배포 환경에 BigQuery 인증 정보가 없어 그 시점 데이터로 대체 표시 중입니다"
+        )
+    else:
+        st.caption("🟢 BigQuery 라이브 데이터")
+
+    score_left, score_center, score_right = st.columns([1, 2, 1])
+    with score_center:
+        st.plotly_chart(build_enps_gauge_chart(selected_team, enps_value, enps_n), width="stretch")
+
+    scatter_col, training_col = st.columns(2)
+    with scatter_col:
+        st.plotly_chart(build_burnout_csat_chart(burnout_df), width="stretch")
+    with training_col:
+        st.plotly_chart(build_training_comparison_chart(training_df), width="stretch")
+
+with tab_report:
+    st.markdown(load_report_markdown())
