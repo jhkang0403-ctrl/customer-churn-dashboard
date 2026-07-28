@@ -32,7 +32,10 @@ TEAM_OPTIONS = ["전체", "1팀", "2팀", "3팀"]
 # BigQuery 연결 (상담원 섹션 전용 — customers/voc 등 기존 6개 차트는 CSV 그대로 사용)
 # ---------------------------------------------------------------------------
 @st.cache_resource
-def get_bigquery_client() -> bigquery.Client:
+def get_bigquery_client() -> bigquery.Client | None:
+    """실패(None 포함)도 st.cache_resource에 캐시된다 — 인증정보가 없는 배포 환경(예: 서비스
+    계정 미설정 Streamlit Cloud)에서 매 rerun마다 느린 ADC/메타데이터서버 타임아웃을
+    반복하지 않기 위함. 호출부는 반환값이 None이면 즉시 실패로 처리해야 한다."""
     try:
         if "gcp_service_account" in st.secrets:
             credentials = service_account.Credentials.from_service_account_info(
@@ -42,7 +45,10 @@ def get_bigquery_client() -> bigquery.Client:
     except Exception:
         # st.secrets 파일 자체가 없는 로컬 환경 등 — 기존처럼 ADC로 폴백
         pass
-    return bigquery.Client(project=BQ_PROJECT_ID)
+    try:
+        return bigquery.Client(project=BQ_PROJECT_ID)
+    except Exception:
+        return None
 
 
 def _team_job_config(team: str) -> bigquery.QueryJobConfig | None:
@@ -415,6 +421,8 @@ def build_tenure_usage_scatter(customers: pd.DataFrame) -> go.Figure:
 # ---------------------------------------------------------------------------
 def load_enps(team: str) -> tuple[float, int]:
     client = get_bigquery_client()
+    if client is None:
+        raise RuntimeError("BigQuery client unavailable")
     where_clause = "WHERE team = @team" if team != "전체" else ""
     query = f"""
         SELECT agent_satisfaction
@@ -460,6 +468,8 @@ def build_enps_gauge_chart(team: str, enps: float, n: int) -> go.Figure:
 
 def load_burnout_csat(team: str) -> pd.DataFrame:
     client = get_bigquery_client()
+    if client is None:
+        raise RuntimeError("BigQuery client unavailable")
     where_clause = "WHERE a.team = @team" if team != "전체" else ""
     query = f"""
         SELECT
@@ -513,6 +523,8 @@ def build_burnout_csat_chart(df: pd.DataFrame) -> go.Figure:
 
 def load_training_comparison(team: str) -> pd.DataFrame:
     client = get_bigquery_client()
+    if client is None:
+        raise RuntimeError("BigQuery client unavailable")
     where_clause = "WHERE a.team = @team" if team != "전체" else ""
     query = f"""
         WITH base AS (
