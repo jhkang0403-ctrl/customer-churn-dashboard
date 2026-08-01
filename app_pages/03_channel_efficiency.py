@@ -30,6 +30,19 @@ def channel_unit_cost(df: pd.DataFrame) -> pd.DataFrame:
     return agg
 
 
+def recent_completed_stats(campaigns_df: pd.DataFrame) -> pd.DataFrame:
+    """최근 3개월(marketing_campaigns.csv 전체 기간)의 완료 캠페인(is_completed=True)만
+    채널별로 집계해 단가를 계산한다.
+
+    강사님 기준 대시보드와 대조해보니 "최근 3개월" 지표는 진행상태 텍스트가 "집행완료"인
+    캠페인만 포함해야 값이 일치했다 (누적 지표는 완료 여부와 무관하게 전체 포함이 맞음).
+    """
+    completed = campaigns_df[campaigns_df["is_completed"] == True].copy()
+    completed["channel"] = completed["채널"].str.replace(" ", "", regex=False)
+    renamed = completed.rename(columns={"실집행": "spend", "유입건수": "signups"})
+    return channel_unit_cost(renamed)
+
+
 def channel_execution_rate(campaigns_df: pd.DataFrame) -> pd.DataFrame:
     """완료 캠페인(is_completed=True) 기준 채널별 집행률(실집행 ÷ 예산)을 계산한다."""
     completed = campaigns_df[campaigns_df["is_completed"] == True].copy()
@@ -143,13 +156,15 @@ july_df = build_month_from_campaigns(campaigns_df, "2024-07")
 combined_df = pd.concat([spend_df[spend_df["month"] < "2024-07"], july_df], ignore_index=True)
 
 cumulative_stats = channel_unit_cost(combined_df)
-recent_months = sorted(combined_df["month"].unique())[-3:]
-recent_df = combined_df[combined_df["month"].isin(recent_months)]
-recent_stats = channel_unit_cost(recent_df)
 
-total_spend = int(combined_df["spend"].sum())
-total_signups = int(combined_df["signups"].sum())
+recent_months = sorted(campaigns_df["월"].unique())
+recent_stats = recent_completed_stats(campaigns_df)
+
+total_spend = int(recent_stats["spend"].sum())
+total_signups = int(recent_stats["signups"].sum())
 avg_unit_cost = total_spend / total_signups
+
+st.caption(f"KPI·최근 3개월 차트 기준: {recent_months[0]}~{recent_months[-1]}, 완료 캠페인(is_completed=True)만 포함")
 
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -165,7 +180,7 @@ st.subheader("채널별 유입 1건당 비용")
 st.plotly_chart(build_unit_cost_bar(cumulative_stats), width="stretch", config=c.PLOTLY_CONFIG)
 
 st.subheader("3개월 단가 vs 누적 단가")
-st.caption(f"최근 3개월 기준: {recent_months[0]} ~ {recent_months[-1]}")
+st.caption(f"최근 3개월(완료 캠페인 기준): {recent_months[0]} ~ {recent_months[-1]}")
 st.plotly_chart(build_recent_vs_cumulative_bar(recent_stats, cumulative_stats), width="stretch", config=c.PLOTLY_CONFIG)
 
 st.subheader("채널별 집행률")
