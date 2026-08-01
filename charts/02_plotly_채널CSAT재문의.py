@@ -4,6 +4,7 @@
 data/data_satisfaction.csv, data/data_consultations.csv를 consult_id로 연결해 재계산한다.
 """
 import os
+import sys
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -11,6 +12,9 @@ from plotly.subplots import make_subplots
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, "data")
+
+sys.path.insert(0, BASE_DIR)
+import common as c
 
 SATISFACTION_PATH = os.path.join(DATA_DIR, "data_satisfaction.csv")
 CONSULTATIONS_PATH = os.path.join(DATA_DIR, "data_consultations.csv")
@@ -51,7 +55,7 @@ def main():
             x=summary["channel"],
             y=summary["CSAT평균"],
             name="CSAT 평균",
-            marker_color="#2a78d6",
+            marker_color=c.COLOR_BAR,
             customdata=summary[["channel", "CSAT평균", "재문의율"]].values,
             hovertemplate=(
                 "<b>%{customdata[0]}</b><br>"
@@ -69,7 +73,7 @@ def main():
             y=summary["재문의율"],
             name="재문의율",
             mode="lines+markers",
-            line=dict(color="#eb6834", width=2),
+            line=dict(color=c.COLOR_LINE, width=2),
             marker=dict(size=9),
             customdata=summary[["channel", "CSAT평균", "재문의율"]].values,
             hovertemplate=(
@@ -82,6 +86,7 @@ def main():
         secondary_y=True,
     )
 
+    fig.update_layout(**c.CHART_LAYOUT)
     fig.update_layout(
         title="채널별 CSAT 평균 vs 재문의율 (CSAT 낮은 순)",
         xaxis_title="채널",
@@ -90,7 +95,12 @@ def main():
     fig.update_yaxes(title_text="CSAT 평균 (점)", secondary_y=False)
     fig.update_yaxes(title_text="재문의율 (%)", secondary_y=True, ticksuffix="%")
 
-    fig.show()
+    if os.environ.get("CHART_HEADLESS"):
+        out_path = os.path.join(BASE_DIR, "charts", "output", "02_채널CSAT재문의.png")
+        fig.write_image(out_path, width=1000, height=600, scale=2)
+        print(f"저장: {out_path}")
+    else:
+        fig.show()
 
 
 if __name__ == "__main__":

@@ -4,12 +4,16 @@
 data/data_consultations.csv, data/data_customers.csv를 직접 읽어 재계산한다.
 """
 import os
+import sys
 
 import pandas as pd
 import plotly.express as px
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, "data")
+
+sys.path.insert(0, BASE_DIR)
+import common as c
 
 CONSULTATIONS_PATH = os.path.join(DATA_DIR, "data_consultations.csv")
 CUSTOMERS_PATH = os.path.join(DATA_DIR, "data_customers.csv")
@@ -67,9 +71,9 @@ def main():
         y="이탈율",
         color="재문의구간",
         color_discrete_map={
-            "0회": "#898781",
-            "1회": "#898781",
-            "2회 이상": "#d03b3b",
+            "0회": c.COLOR_NEUTRAL,
+            "1회": c.COLOR_NEUTRAL,
+            "2회 이상": c.COLOR_CRITICAL,
         },
         text=summary["이탈율"].map(lambda v: f"{v:.1f}%"),
         custom_data=["고객수", "이탈고객수", "이탈율"],
@@ -103,9 +107,15 @@ def main():
         font=dict(color="#0b0b0b"),
     )
 
+    fig.update_layout(**c.CHART_LAYOUT)
     fig.update_layout(showlegend=False, yaxis_ticksuffix="%")
 
-    fig.show()
+    if os.environ.get("CHART_HEADLESS"):
+        out_path = os.path.join(BASE_DIR, "charts", "output", "03_재문의구간이탈율.png")
+        fig.write_image(out_path, width=1000, height=600, scale=2)
+        print(f"저장: {out_path}")
+    else:
+        fig.show()
 
 
 if __name__ == "__main__":
