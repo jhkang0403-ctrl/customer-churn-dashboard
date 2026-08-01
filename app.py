@@ -8,11 +8,6 @@ pg = st.navigation(
         st.Page("app_pages/02_report.py", title="개선 제안 리포트", icon=":material/description:"),
         st.Page("app_pages/03_channel_efficiency.py", title="채널 효율", icon=":material/payments:"),
         st.Page(
-            "app_pages/04_expression_host_yield_analysis.py",
-            title="발현호스트 수율 분석",
-            icon=":material/science:",
-        ),
-        st.Page(
             "app_pages/05_상담_재문의_분석.py",
             title="상담 재문의 분석",
             icon=":material/support_agent:",
