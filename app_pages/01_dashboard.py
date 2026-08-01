@@ -379,7 +379,7 @@ def load_enps(team: str) -> tuple[float, int]:
 
 
 def build_enps_gauge_chart(team: str, enps: float, n: int) -> go.Figure:
-    bar_color = c.COLOR_CRITICAL if enps < 0 else c.COLOR_POSITIVE
+    bar_color = c.COLOR_CRITICAL if enps < 0 else c.COLOR_NEUTRAL
     fig = go.Figure(
         go.Indicator(
             mode="gauge+number",

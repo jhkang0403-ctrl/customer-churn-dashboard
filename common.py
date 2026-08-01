@@ -13,18 +13,21 @@ REPORT_PATH = os.path.join(BASE_DIR, "report", "고객서비스_만족도개선_
 
 REFERENCE_DATE = pd.Timestamp("2024-12-31")
 
-COLOR_NEUTRAL = "#898781"
-COLOR_CRITICAL = "#d03b3b"
-COLOR_BAR = "#2a78d6"
-COLOR_LINE = "#eb6834"
-COLOR_POSITIVE = "#2a9d57"
+# 화이트 배경 + 딥블루 단일 강조색 + 절제된 회색조 팔레트.
+# CRITICAL과 LINE은 의도적으로 같은 딥블루를 공유한다 ("주목할 값"은 항상 이 색 하나로만 표시).
+COLOR_NEUTRAL = "#9AA5B1"
+COLOR_CRITICAL = "#1D4E89"
+COLOR_BAR = "#4A5568"
+COLOR_LINE = "#1D4E89"
 
 CHART_LAYOUT = dict(
-    font=dict(size=13),
+    font=dict(size=13, family="Segoe UI, Arial, sans-serif", color="#1F2937"),
     margin=dict(t=40, b=40, l=10, r=10),
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     paper_bgcolor="rgba(0,0,0,0)",
     plot_bgcolor="rgba(0,0,0,0)",
+    xaxis=dict(gridcolor="#E5E7EB", zerolinecolor="#E5E7EB"),
+    yaxis=dict(gridcolor="#E5E7EB", zerolinecolor="#E5E7EB"),
 )
 
 PLOTLY_CONFIG = {"displayModeBar": False}
